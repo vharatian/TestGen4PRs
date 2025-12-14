@@ -9,7 +9,6 @@ from typing import Any
 import numpy as np
 import pandas as pd
 import toml
-from datasets import load_dataset
 
 import openhands.agenthub
 from evaluation.benchmarks.testgeneval.constants import MAP_REPO_VERSION_TO_SPECS
@@ -17,7 +16,10 @@ from evaluation.benchmarks.testgeneval.prompt import (
     CODEACT_TESTGEN_PROMPT,
     CODEACT_TESTGEN_PROMPT_ITERATE,
 )
-from evaluation.benchmarks.testgeneval.utils import get_test_directives
+from evaluation.benchmarks.testgeneval.utils import (
+    get_test_directives,
+    load_testgeneval_dataset,
+)
 from evaluation.utils.shared import (
     EvalException,
     EvalMetadata,
@@ -85,6 +87,23 @@ def get_instruction(instance: pd.Series, metadata: EvalMetadata):
         if instance['full_pred'] is not None
         else CODEACT_TESTGEN_PROMPT
     )
+    context = instance.get('preds_context', {}) or {}
+    issue_text = (
+        context.get('problem_statement', '')
+        or context.get('issue_text', '')
+        or instance.get('problem_statement', '')
+    )
+    hints_text = (
+        context.get('hints_text', '')
+        or context.get('hints', '')
+        or instance.get('hints_text', '')
+    )
+    pr_title = context.get('pr_title', '') or context.get('title', '')
+    pr_description = (
+        context.get('pr_description', '')
+        or context.get('description', '')
+        or context.get('body', '')
+    )
     instruction = prompt_to_use.format(
         code_file=os.path.join('/testbed', instance.code_file),
         test_file=os.path.join('/testbed', instance.test_file),
@@ -92,6 +111,10 @@ def get_instruction(instance: pd.Series, metadata: EvalMetadata):
         code_src=instance['code_src'],
         imports='\n'.join(instance.local_imports),
         workspace_dir_name=_get_swebench_workspace_dir_name(instance),
+        issue_text=issue_text,
+        hints_text=hints_text,
+        pr_title=pr_title,
+        pr_description=pr_description,
     )
 
     if RUN_WITH_BROWSING:
@@ -527,11 +550,10 @@ if __name__ == '__main__':
                 pred = json.loads(line)
                 preds_map[pred['id']] = pred['preds']['full'][0]
 
-    # NOTE: It is preferable to load datasets from huggingface datasets and perform post-processing
-    # so we don't need to manage file uploading to OpenHands's repo
-    dataset = load_dataset(args.dataset, split=args.split)
+    # Prefer local JSON/JSONL when provided; fall back to HF datasets otherwise
+    raw_dataset = load_testgeneval_dataset(args.dataset, args.split)
     logger.info(f'Loaded dataset {args.dataset} with split {args.split}')
-    testgeneval_filepairs = prepare_dataset_pre(dataset.to_pandas(), 'id')
+    testgeneval_filepairs = prepare_dataset_pre(pd.DataFrame(raw_dataset), 'id')
 
     llm_config = None
     if args.llm_config:

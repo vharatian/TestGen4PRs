@@ -46,22 +46,28 @@ When you think you have a fully adequate test suite, please run the following co
 """
 
 CODEACT_TESTGEN_PROMPT = """
-Your goal is to generate a comprehensive, **broad-coverage** test suite for the code below, ensuring you test as many lines and branches as possible on the first attempt.
+Your goal is to generate a comprehensive, **broad-coverage** test suite for the code below, with an initial emphasis on **fail-to-pass** tests that reproduce the described issue before any fixes.
 
 Place your test suite in a new file named {test_file}.
 
+PR / ISSUE CONTEXT (use this to craft fail-to-pass tests first):
+- PR Title: {pr_title}
+- PR Description: {pr_description}
+- Issue: {issue_text}
+- Hints: {hints_text}
+
 IMPORTANT REQUIREMENTS:
 1. **No external help or resources**—use only the snippet below.
-2. **Focus on breadth over depth**: cover all major functions, classes, and code paths early to minimize coverage iterations.
-3. Each test function must start with `test_` and use `assert` to verify behavior.
-4. Include only necessary imports (standard library or local).
-5. Do **not** modify existing test files—create a brand new one. No `main()` or other non-test code.
-6. Produce **at least 20 test functions**; if coverage is lacking, add more tests rather than removing or changing existing ones.
-7. Use the following commands to check coverage:
+2. First goal: produce fail-to-pass tests that reproduce the issue. Ensure you see failing tests before finalizing.
+3. Then broaden coverage: cover major functions, classes, and code paths.
+4. Each test function must start with `test_` and use `assert` to verify behavior.
+5. Include only necessary imports (standard library or local).
+6. Do **not** modify existing test files—create a brand new one. No `main()` or other non-test code.
+7. Produce **at least 20 test functions**; if coverage is lacking, add more tests rather than removing or changing existing ones.
+8. Run the provided test command to observe failures/passes (no coverage tooling needed):
    <execute_bash> {coverage_command} </execute_bash>
-   <execute_bash> coverage report -m --include {code_file} </execute_bash>
-   If lines remain uncovered, add new tests targeting them specifically.
-8. When you're satisfied with coverage, finalize by running:
+   If the issue is not reproduced, add new fail-to-pass tests targeting it.
+9. When you're satisfied, finalize by running:
    <execute_bash> exit </execute_bash>
 
 Below is the **complete code snippet** to test:
@@ -86,18 +92,23 @@ If no tests run, then remove {test_file} and create {test_file} with a new suite
 
 Otherwise, improve it aiming to improve code coverage.
 
+PR / ISSUE CONTEXT (use this to craft fail-to-pass tests first):
+- PR Title: {pr_title}
+- PR Description: {pr_description}
+- Issue: {issue_text}
+- Hints: {hints_text}
+
 IMPORTANT REQUIREMENTS:
-1. Use the following commands to check coverage (RUN THIS FIRST):
+1. Run the provided test command (RUN THIS FIRST) to observe failures/passes (no coverage tooling needed):
    <execute_bash> {coverage_command} </execute_bash>
-   <execute_bash> coverage report -m --include {code_file} </execute_bash>
-   If lines remain uncovered, add new tests targeting them specifically.
+   If the issue is not reproduced, add new fail-to-pass tests targeting it.
 2. **No external help or resources**—use only the snippet below.
-3. **Focus on breadth over depth**: cover all major functions, classes, and code paths early to minimize coverage iterations.
+3. **Focus on breadth over depth**: cover all major functions, classes, and code paths early to minimize iterations.
 4. Each test function must use `assert` to verify behavior.
 5. Include only necessary imports (standard library or local).
 6. Do **not** modify other test files in the repository. No `main()` or other non-test code.
 7. Produce **at least 20 test functions**; if coverage is lacking, add more tests rather than removing or changing existing ones.
-8. When you're satisfied with coverage, finalize by running:
+8. When you're satisfied, finalize by running:
    <execute_bash> exit </execute_bash>
 
 Below is the **complete code snippet** to test:
