@@ -46,28 +46,26 @@ When you think you have a fully adequate test suite, please run the following co
 """
 
 CODEACT_TESTGEN_PROMPT = """
-Your goal is to generate a comprehensive, **broad-coverage** test suite for the code below, with an initial emphasis on **fail-to-pass** tests that reproduce the described issue before any fixes.
+Your goal is to write a test suite for the code below, specifically designing it to **reproduce the issue** described in the context (Fail-to-Pass).
 
 Place your test suite in a new file named {test_file}.
 
-PR / ISSUE CONTEXT (use this to craft fail-to-pass tests first):
+PR / ISSUE CONTEXT:
 - PR Title: {pr_title}
 - PR Description: {pr_description}
 - Issue: {issue_text}
 - Hints: {hints_text}
 
+{existing_tests}
+
 IMPORTANT REQUIREMENTS:
-1. **No external help or resources**—use only the snippet below.
-2. First goal: produce fail-to-pass tests that reproduce the issue. Ensure you see failing tests before finalizing.
-3. Then broaden coverage: cover major functions, classes, and code paths.
-4. Each test function must start with `test_` and use `assert` to verify behavior.
-5. Include only necessary imports (standard library or local).
-6. Do **not** modify existing test files—create a brand new one. No `main()` or other non-test code.
-7. Produce **at least 20 test functions**; if coverage is lacking, add more tests rather than removing or changing existing ones.
-8. Run the provided test command to observe failures/passes (no coverage tooling needed):
+1. **Reproduce the Issue**: Your PRIMARY and ONLY goal is to write a test case that fails on the current code but represents the intended behavior (as described in the issue).
+2. **Self-Contained**: Use only the provided code snippet and standard/local imports. Do NOT use external resources.
+3. **Validation**: Run the tests using the command below to confirm you have at least one FAILING test (reproducing the issue).
    <execute_bash> {coverage_command} </execute_bash>
-   If the issue is not reproduced, add new fail-to-pass tests targeting it.
-9. When you're satisfied, finalize by running:
+4. **No Modifications**: Do NOT modify existing source code or test files. Only write to {test_file}.
+5. **Iterate**: If the issue is not reproduced, analyze the failure and add more targeted tests.
+6. **Finalize**: When you have satisfied the requirements, exit.
    <execute_bash> exit </execute_bash>
 
 Below is the **complete code snippet** to test:
@@ -80,7 +78,7 @@ NOTE: if you are testing django, you must use from django.test import SimpleTest
 NOTE: if there is an error executing tests you MUST fix it before exiting. DO NOT install new packages.
 NOTE: if outputting a revised test suite REPLACE {test_file} with the revised suite
 
-**Output the final test suite** (20+ tests) for {test_file} in a single code block, no extra commentary. MAKE SURE you run the tests and ensure you can see which tests passed and failed BEFORE exiting.
+**Output the final test suite** for {test_file} in a single code block. MAKE SURE you run the tests and see at least one FAILURE (reproduction) before exiting.
 """
 
 CODEACT_TESTGEN_PROMPT_ITERATE = """
@@ -97,6 +95,8 @@ PR / ISSUE CONTEXT (use this to craft fail-to-pass tests first):
 - PR Description: {pr_description}
 - Issue: {issue_text}
 - Hints: {hints_text}
+
+{existing_tests}
 
 IMPORTANT REQUIREMENTS:
 1. Run the provided test command (RUN THIS FIRST) to observe failures/passes (no coverage tooling needed):

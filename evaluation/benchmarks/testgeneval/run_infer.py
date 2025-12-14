@@ -40,6 +40,7 @@ from openhands.core.config import (
     AgentConfig,
     OpenHandsConfig,
     SandboxConfig,
+    LLMConfig,
     get_evaluation_parser,
     get_llm_config_arg,
 )
@@ -72,11 +73,17 @@ def _get_swebench_workspace_dir_name(instance: pd.Series) -> str:
 def get_instruction(instance: pd.Series, metadata: EvalMetadata):
     # workspace_dir_name = _get_swebench_workspace_dir_name(instance)
     # Prepare instruction
+    test_cmd = MAP_REPO_VERSION_TO_SPECS[instance['repo']][instance['version']][
+        'test_cmd'
+    ]
+    if metadata.details.get('no_coverage', False):
+        # Strip 'coverage run' prefixes
+        test_cmd = test_cmd.replace('coverage run -m ', 'python -m ')
+        test_cmd = test_cmd.replace('coverage run ', 'python ')
+
     coverage_command = ' '.join(
         [
-            MAP_REPO_VERSION_TO_SPECS[instance['repo']][instance['version']][
-                'test_cmd'
-            ],
+            test_cmd,
             *get_test_directives(instance),
         ]
     )
@@ -88,11 +95,16 @@ def get_instruction(instance: pd.Series, metadata: EvalMetadata):
         else CODEACT_TESTGEN_PROMPT
     )
     context = instance.get('preds_context', {}) or {}
-    issue_text = (
-        context.get('problem_statement', '')
-        or context.get('issue_text', '')
-        or instance.get('problem_statement', '')
-    )
+
+    # Handle Issue Text based on flag
+    issue_text = ''
+    if metadata.details.get('include_issue', False):
+        issue_text = (
+            context.get('problem_statement', '')
+            or context.get('issue_text', '')
+            or instance.get('problem_statement', '')
+        )
+
     hints_text = (
         context.get('hints_text', '')
         or context.get('hints', '')
@@ -104,6 +116,12 @@ def get_instruction(instance: pd.Series, metadata: EvalMetadata):
         or context.get('description', '')
         or context.get('body', '')
     )
+
+    # Handle Existing Tests based on flag
+    existing_tests = ''
+    if metadata.details.get('include_existing_tests', False) and instance.get('test_src'):
+        existing_tests = f"\nEXISTING TESTS:\n```python\n{instance['test_src']}\n```\n"
+
     instruction = prompt_to_use.format(
         code_file=os.path.join('/testbed', instance.code_file),
         test_file=os.path.join('/testbed', instance.test_file),
@@ -115,6 +133,7 @@ def get_instruction(instance: pd.Series, metadata: EvalMetadata):
         hints_text=hints_text,
         pr_title=pr_title,
         pr_description=pr_description,
+        existing_tests=existing_tests,
     )
 
     if RUN_WITH_BROWSING:
@@ -536,6 +555,21 @@ if __name__ == '__main__':
         type=str,
         help='Path to the zero shot test file predictions',
     )
+    parser.add_argument(
+        '--no_coverage',
+        action='store_true',
+        help='Disable coverage tool',
+    )
+    parser.add_argument(
+        '--include_issue',
+        action='store_true',
+        help='Include issue description in the prompt',
+    )
+    parser.add_argument(
+        '--include_existing_tests',
+        action='store_true',
+        help='Include existing test source in the prompt',
+    )
     args, _ = parser.parse_known_args()
 
     if args.testfile_start and not args.zero_shot_path:
@@ -558,14 +592,23 @@ if __name__ == '__main__':
     llm_config = None
     if args.llm_config:
         llm_config = get_llm_config_arg(args.llm_config)
-        llm_config.log_completions = True
-        # modify_params must be False for evaluation purpose, for reproducibility and accuracy of results
-        llm_config.modify_params = False
 
     if llm_config is None:
-        raise ValueError(f'Could not find LLM config: --llm_config {args.llm_config}')
+        logger.info(f"No --llm_config provided, using default LLMConfig from environment variables.")
+        llm_config = LLMConfig()
 
-    details = {}
+    if llm_config.log_completions is None:
+        llm_config.log_completions = True
+
+    # modify_params must be False for evaluation purpose, for reproducibility and accuracy of results
+    llm_config.modify_params = False
+
+    # Pass new args to metadata details since signatures are fixed or hard to change cleanly
+    details = {
+        'no_coverage': args.no_coverage,
+        'include_issue': args.include_issue,
+        'include_existing_tests': args.include_existing_tests,
+    }
     _agent_cls = openhands.agenthub.Agent.get_cls(args.agent_cls)
 
     dataset_descrption = (
