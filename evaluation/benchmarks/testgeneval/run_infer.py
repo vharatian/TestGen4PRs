@@ -96,28 +96,44 @@ def get_instruction(instance: pd.Series, metadata: EvalMetadata):
     )
     context = instance.get('preds_context', {}) or {}
 
-    # Handle Issue Text based on flag
+    # Handle Issue Text based on flag (default: included unless explicitly disabled)
     issue_text = ''
-    if metadata.details.get('include_issue', False):
+    if metadata.details.get('include_issue', True):
         issue_text = (
             context.get('problem_statement', '')
             or context.get('issue_text', '')
             or instance.get('problem_statement', '')
         )
 
-    hints_text = (
-        context.get('hints_text', '')
-        or context.get('hints', '')
-        or instance.get('hints_text', '')
-    )
-    pr_title = context.get('pr_title', '') or context.get('title', '')
-    pr_description = (
-        context.get('pr_description', '')
-        or context.get('description', '')
-        or context.get('body', '')
-    )
+    # Handle Hints based on flag (default: included unless explicitly disabled)
+    hints_text = ''
+    if metadata.details.get('include_hints', True):
+        hints_text = (
+            context.get('hints_text', '')
+            or context.get('hints', '')
+            or instance.get('hints_text', '')
+        )
 
-    # Handle Existing Tests based on flag
+    # Handle PR Title based on flag (default: included unless explicitly disabled)
+    pr_title = ''
+    if metadata.details.get('include_pr_title', True):
+        pr_title = context.get('pr_title', '') or context.get('title', '')
+
+    # Handle PR Description based on flag (default: included unless explicitly disabled)
+    pr_description = ''
+    if metadata.details.get('include_pr_description', True):
+        pr_description = (
+            context.get('pr_description', '')
+            or context.get('description', '')
+            or context.get('body', '')
+        )
+
+    # Handle Patch based on flag (default: included unless explicitly disabled)
+    patch = ''
+    if metadata.details.get('include_patch', True):
+        patch = instance.get('patch', '')
+
+    # Handle Existing Tests based on flag (default: NOT included unless explicitly enabled)
     existing_tests = ''
     if metadata.details.get('include_existing_tests', False) and instance.get('test_src'):
         existing_tests = f"\nEXISTING TESTS:\n```python\n{instance['test_src']}\n```\n"
@@ -134,6 +150,7 @@ def get_instruction(instance: pd.Series, metadata: EvalMetadata):
         pr_title=pr_title,
         pr_description=pr_description,
         existing_tests=existing_tests,
+        patch=patch,
     )
 
     if RUN_WITH_BROWSING:
@@ -561,14 +578,34 @@ if __name__ == '__main__':
         help='Disable coverage tool',
     )
     parser.add_argument(
-        '--include_issue',
+        '--exclude_issue',
         action='store_true',
-        help='Include issue description in the prompt',
+        help='Exclude issue description from the prompt (included by default)',
+    )
+    parser.add_argument(
+        '--exclude_hints',
+        action='store_true',
+        help='Exclude hints from the prompt (included by default)',
+    )
+    parser.add_argument(
+        '--exclude_pr_title',
+        action='store_true',
+        help='Exclude PR title from the prompt (included by default)',
+    )
+    parser.add_argument(
+        '--exclude_pr_description',
+        action='store_true',
+        help='Exclude PR description from the prompt (included by default)',
+    )
+    parser.add_argument(
+        '--exclude_patch',
+        action='store_true',
+        help='Exclude code patch/diff from the prompt (included by default)',
     )
     parser.add_argument(
         '--include_existing_tests',
         action='store_true',
-        help='Include existing test source in the prompt',
+        help='Include existing test source in the prompt (excluded by default)',
     )
     args, _ = parser.parse_known_args()
 
@@ -604,10 +641,15 @@ if __name__ == '__main__':
     llm_config.modify_params = False
 
     # Pass new args to metadata details since signatures are fixed or hard to change cleanly
+    # Note: Most fields are INCLUDED by default, so we check for EXCLUDE flags
     details = {
         'no_coverage': args.no_coverage,
-        'include_issue': args.include_issue,
-        'include_existing_tests': args.include_existing_tests,
+        'include_issue': not args.exclude_issue,  # Included by default
+        'include_hints': not args.exclude_hints,  # Included by default
+        'include_pr_title': not args.exclude_pr_title,  # Included by default
+        'include_pr_description': not args.exclude_pr_description,  # Included by default
+        'include_patch': not args.exclude_patch,  # Included by default
+        'include_existing_tests': args.include_existing_tests,  # Excluded by default
     }
     _agent_cls = openhands.agenthub.Agent.get_cls(args.agent_cls)
 
