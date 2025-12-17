@@ -138,9 +138,18 @@ def get_instruction(instance: pd.Series, metadata: EvalMetadata):
     if metadata.details.get('include_existing_tests', False) and instance.get('test_src'):
         existing_tests = f"\nEXISTING TESTS:\n```python\n{instance['test_src']}\n```\n"
 
+    # Create separate test file path with _openhands suffix
+    original_test_file = instance.test_file
+    if original_test_file.endswith('.py'):
+        openhands_test_file = original_test_file[:-3] + '_openhands.py'
+    else:
+        openhands_test_file = original_test_file + '_openhands'
+
+    test_file_path = os.path.join('/testbed', openhands_test_file)
+
     instruction = prompt_to_use.format(
         code_file=os.path.join('/testbed', instance.code_file),
-        test_file=os.path.join('/testbed', instance.test_file),
+        test_file=test_file_path,
         coverage_command=coverage_command,
         code_src=instance['code_src'],
         imports='\n'.join(instance.local_imports),
@@ -158,7 +167,7 @@ def get_instruction(instance: pd.Series, metadata: EvalMetadata):
             '<IMPORTANT!>\nYou SHOULD NEVER attempt to browse the web. </IMPORTANT!>\n'
         )
 
-    return instruction
+    return instruction, openhands_test_file
 
 
 # TODO: migrate all swe-bench docker to ghcr.io/openhands
@@ -379,9 +388,44 @@ def initialize_runtime(
     logger.info('-' * 30)
 
 
+def extract_test_file(
+    runtime: Runtime,
+    instance: pd.Series,
+    test_file_path: str,
+) -> str:
+    """Extract the generated test file from the container.
+
+    Args:
+        runtime: The runtime instance
+        instance: The test instance
+        test_file_path: Relative path to the test file (e.g., 'astropy/modeling/tests/test_separable_openhands.py')
+
+    Returns:
+        str: Content of the test file
+    """
+    workspace_dir_name = _get_swebench_workspace_dir_name(instance)
+
+    # Navigate to workspace
+    action = CmdRunAction(command=f'cd /workspace/{workspace_dir_name}')
+    action.set_hard_timeout(600)
+    obs = runtime.run_action(action)
+    if obs.exit_code != 0:
+        raise Exception(f'Failed to cd to /workspace/{workspace_dir_name}: {str(obs)}')
+
+    # Read the test file
+    action = CmdRunAction(command=f'cat {test_file_path}')
+    action.set_hard_timeout(600)
+    obs = runtime.run_action(action)
+    if obs.exit_code != 0:
+        raise Exception(f'Failed to read {test_file_path}: {str(obs)}')
+
+    return obs.content.strip()
+
+
 def complete_runtime(
     runtime: Runtime,
     instance: pd.Series,  # this argument is not required, but it is used to get the workspace_dir_name
+    openhands_test_file: str,  # path to the _openhands test file
 ) -> dict[str, Any]:
     """Complete the runtime for the agent.
 
@@ -406,14 +450,14 @@ def complete_runtime(
             f'Failed to cd to /workspace/{workspace_dir_name}: {str(obs)}',
         )
 
-        action = CmdRunAction(command=f'cat {instance.test_file}')
+        action = CmdRunAction(command=f'cat {openhands_test_file}')
         action.set_hard_timeout(600)
         logger.info(action, extra={'msg_type': 'ACTION'})
         obs = runtime.run_action(action)
         logger.info(obs, extra={'msg_type': 'OBSERVATION'})
         assert_and_raise(
             obs.exit_code == 0,
-            f'Failed to find file: {instance.test_file} in /workspace/{workspace_dir_name}',
+            f'Failed to find file: {openhands_test_file} in /workspace/{workspace_dir_name}',
         )
 
         test_suite = obs.content.strip()
@@ -459,7 +503,7 @@ def process_instance(
     try:
         initialize_runtime(runtime, instance)
 
-        instruction = get_instruction(instance, metadata)
+        instruction, openhands_test_file = get_instruction(instance, metadata)
 
         # Here's how you can run the agent (similar to the `main` function) and get the final task state
         state: State | None = asyncio.run(
@@ -478,11 +522,30 @@ def process_instance(
             raise EvalException('Fatal error detected: ' + state.last_error)
 
         # ======= THIS IS SWE-Bench specific =======
-        return_val = complete_runtime(runtime, instance)
+        return_val = complete_runtime(runtime, instance, openhands_test_file)
         test_suite = return_val['test_suite']
         logger.info(
             f'Got test suite for instance {instance.instance_id}:\n--------\n{test_suite}\n--------'
         )
+
+        # ======= Extract generated test file =======
+        try:
+            # Extract the openhands test file from container
+            test_file_content = extract_test_file(runtime, instance, openhands_test_file)
+
+            # Save to host filesystem
+            test_files_dir = os.path.join(metadata.eval_output_dir, 'test_files', instance.instance_id)
+            os.makedirs(test_files_dir, exist_ok=True)
+
+            test_filename = os.path.basename(openhands_test_file)
+            test_file_save_path = os.path.join(test_files_dir, test_filename)
+
+            with open(test_file_save_path, 'w') as f:
+                f.write(test_file_content)
+
+            logger.info(f'Saved generated test file to: {test_file_save_path}')
+        except Exception as e:
+            logger.warning(f'Failed to extract test file: {e}')
     finally:
         runtime.close()
 
