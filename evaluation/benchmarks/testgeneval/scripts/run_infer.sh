@@ -92,7 +92,9 @@ function run_eval() {
     --eval-num-workers $NUM_WORKERS \
     --eval-note $eval_note \
     --dataset $DATASET \
-    --split $SPLIT"
+    --split $SPLIT \
+    --include_issue \
+    --no_coverage"
 
   if [ -n "$EVAL_LIMIT" ]; then
     echo "EVAL_LIMIT: $EVAL_LIMIT"

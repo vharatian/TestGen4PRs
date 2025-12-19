@@ -9,7 +9,6 @@ from typing import Any
 import numpy as np
 import pandas as pd
 import toml
-from datasets import load_dataset
 
 import openhands.agenthub
 from evaluation.benchmarks.testgeneval.constants import MAP_REPO_VERSION_TO_SPECS
@@ -17,7 +16,10 @@ from evaluation.benchmarks.testgeneval.prompt import (
     CODEACT_TESTGEN_PROMPT,
     CODEACT_TESTGEN_PROMPT_ITERATE,
 )
-from evaluation.benchmarks.testgeneval.utils import get_test_directives
+from evaluation.benchmarks.testgeneval.utils import (
+    get_test_directives,
+    load_testgeneval_dataset,
+)
 from evaluation.utils.shared import (
     EvalException,
     EvalMetadata,
@@ -38,6 +40,7 @@ from openhands.core.config import (
     AgentConfig,
     OpenHandsConfig,
     SandboxConfig,
+    LLMConfig,
     get_evaluation_parser,
     get_llm_config_arg,
 )
@@ -70,11 +73,17 @@ def _get_swebench_workspace_dir_name(instance: pd.Series) -> str:
 def get_instruction(instance: pd.Series, metadata: EvalMetadata):
     # workspace_dir_name = _get_swebench_workspace_dir_name(instance)
     # Prepare instruction
+    test_cmd = MAP_REPO_VERSION_TO_SPECS[instance['repo']][instance['version']][
+        'test_cmd'
+    ]
+    if metadata.details.get('no_coverage', False):
+        # Strip 'coverage run' prefixes
+        test_cmd = test_cmd.replace('coverage run -m ', 'python -m ')
+        test_cmd = test_cmd.replace('coverage run ', 'python ')
+
     coverage_command = ' '.join(
         [
-            MAP_REPO_VERSION_TO_SPECS[instance['repo']][instance['version']][
-                'test_cmd'
-            ],
+            test_cmd,
             *get_test_directives(instance),
         ]
     )
@@ -85,13 +94,72 @@ def get_instruction(instance: pd.Series, metadata: EvalMetadata):
         if instance['full_pred'] is not None
         else CODEACT_TESTGEN_PROMPT
     )
+    context = instance.get('preds_context', {}) or {}
+
+    # Handle Issue Text based on flag (default: included unless explicitly disabled)
+    issue_text = ''
+    if metadata.details.get('include_issue', True):
+        issue_text = (
+            context.get('problem_statement', '')
+            or context.get('issue_text', '')
+            or instance.get('problem_statement', '')
+        )
+
+    # Handle Hints based on flag (default: included unless explicitly disabled)
+    hints_text = ''
+    if metadata.details.get('include_hints', True):
+        hints_text = (
+            context.get('hints_text', '')
+            or context.get('hints', '')
+            or instance.get('hints_text', '')
+        )
+
+    # Handle PR Title based on flag (default: included unless explicitly disabled)
+    pr_title = ''
+    if metadata.details.get('include_pr_title', True):
+        pr_title = context.get('pr_title', '') or context.get('title', '')
+
+    # Handle PR Description based on flag (default: included unless explicitly disabled)
+    pr_description = ''
+    if metadata.details.get('include_pr_description', True):
+        pr_description = (
+            context.get('pr_description', '')
+            or context.get('description', '')
+            or context.get('body', '')
+        )
+
+    # Handle Patch based on flag (default: included unless explicitly disabled)
+    patch = ''
+    if metadata.details.get('include_patch', True):
+        patch = instance.get('patch', '')
+
+    # Handle Existing Tests based on flag (default: NOT included unless explicitly enabled)
+    existing_tests = ''
+    if metadata.details.get('include_existing_tests', False) and instance.get('test_src'):
+        existing_tests = f"\nEXISTING TESTS:\n```python\n{instance['test_src']}\n```\n"
+
+    # Create separate test file path with _openhands suffix
+    original_test_file = instance.test_file
+    if original_test_file.endswith('.py'):
+        openhands_test_file = original_test_file[:-3] + '_openhands.py'
+    else:
+        openhands_test_file = original_test_file + '_openhands'
+
+    test_file_path = os.path.join('/testbed', openhands_test_file)
+
     instruction = prompt_to_use.format(
         code_file=os.path.join('/testbed', instance.code_file),
-        test_file=os.path.join('/testbed', instance.test_file),
+        test_file=test_file_path,
         coverage_command=coverage_command,
         code_src=instance['code_src'],
         imports='\n'.join(instance.local_imports),
         workspace_dir_name=_get_swebench_workspace_dir_name(instance),
+        issue_text=issue_text,
+        hints_text=hints_text,
+        pr_title=pr_title,
+        pr_description=pr_description,
+        existing_tests=existing_tests,
+        patch=patch,
     )
 
     if RUN_WITH_BROWSING:
@@ -99,7 +167,7 @@ def get_instruction(instance: pd.Series, metadata: EvalMetadata):
             '<IMPORTANT!>\nYou SHOULD NEVER attempt to browse the web. </IMPORTANT!>\n'
         )
 
-    return instruction
+    return instruction, openhands_test_file
 
 
 # TODO: migrate all swe-bench docker to ghcr.io/openhands
@@ -320,9 +388,44 @@ def initialize_runtime(
     logger.info('-' * 30)
 
 
+def extract_test_file(
+    runtime: Runtime,
+    instance: pd.Series,
+    test_file_path: str,
+) -> str:
+    """Extract the generated test file from the container.
+
+    Args:
+        runtime: The runtime instance
+        instance: The test instance
+        test_file_path: Relative path to the test file (e.g., 'astropy/modeling/tests/test_separable_openhands.py')
+
+    Returns:
+        str: Content of the test file
+    """
+    workspace_dir_name = _get_swebench_workspace_dir_name(instance)
+
+    # Navigate to workspace
+    action = CmdRunAction(command=f'cd /workspace/{workspace_dir_name}')
+    action.set_hard_timeout(600)
+    obs = runtime.run_action(action)
+    if obs.exit_code != 0:
+        raise Exception(f'Failed to cd to /workspace/{workspace_dir_name}: {str(obs)}')
+
+    # Read the test file
+    action = CmdRunAction(command=f'cat {test_file_path}')
+    action.set_hard_timeout(600)
+    obs = runtime.run_action(action)
+    if obs.exit_code != 0:
+        raise Exception(f'Failed to read {test_file_path}: {str(obs)}')
+
+    return obs.content.strip()
+
+
 def complete_runtime(
     runtime: Runtime,
     instance: pd.Series,  # this argument is not required, but it is used to get the workspace_dir_name
+    openhands_test_file: str,  # path to the _openhands test file
 ) -> dict[str, Any]:
     """Complete the runtime for the agent.
 
@@ -347,14 +450,14 @@ def complete_runtime(
             f'Failed to cd to /workspace/{workspace_dir_name}: {str(obs)}',
         )
 
-        action = CmdRunAction(command=f'cat {instance.test_file}')
+        action = CmdRunAction(command=f'cat {openhands_test_file}')
         action.set_hard_timeout(600)
         logger.info(action, extra={'msg_type': 'ACTION'})
         obs = runtime.run_action(action)
         logger.info(obs, extra={'msg_type': 'OBSERVATION'})
         assert_and_raise(
             obs.exit_code == 0,
-            f'Failed to find file: {instance.test_file} in /workspace/{workspace_dir_name}',
+            f'Failed to find file: {openhands_test_file} in /workspace/{workspace_dir_name}',
         )
 
         test_suite = obs.content.strip()
@@ -400,7 +503,7 @@ def process_instance(
     try:
         initialize_runtime(runtime, instance)
 
-        instruction = get_instruction(instance, metadata)
+        instruction, openhands_test_file = get_instruction(instance, metadata)
 
         # Here's how you can run the agent (similar to the `main` function) and get the final task state
         state: State | None = asyncio.run(
@@ -419,11 +522,30 @@ def process_instance(
             raise EvalException('Fatal error detected: ' + state.last_error)
 
         # ======= THIS IS SWE-Bench specific =======
-        return_val = complete_runtime(runtime, instance)
+        return_val = complete_runtime(runtime, instance, openhands_test_file)
         test_suite = return_val['test_suite']
         logger.info(
             f'Got test suite for instance {instance.instance_id}:\n--------\n{test_suite}\n--------'
         )
+
+        # ======= Extract generated test file =======
+        try:
+            # Extract the openhands test file from container
+            test_file_content = extract_test_file(runtime, instance, openhands_test_file)
+
+            # Save to host filesystem
+            test_files_dir = os.path.join(metadata.eval_output_dir, 'test_files', instance.instance_id)
+            os.makedirs(test_files_dir, exist_ok=True)
+
+            test_filename = os.path.basename(openhands_test_file)
+            test_file_save_path = os.path.join(test_files_dir, test_filename)
+
+            with open(test_file_save_path, 'w') as f:
+                f.write(test_file_content)
+
+            logger.info(f'Saved generated test file to: {test_file_save_path}')
+        except Exception as e:
+            logger.warning(f'Failed to extract test file: {e}')
     finally:
         runtime.close()
 
@@ -513,6 +635,41 @@ if __name__ == '__main__':
         type=str,
         help='Path to the zero shot test file predictions',
     )
+    parser.add_argument(
+        '--no_coverage',
+        action='store_true',
+        help='Disable coverage tool',
+    )
+    parser.add_argument(
+        '--exclude_issue',
+        action='store_true',
+        help='Exclude issue description from the prompt (included by default)',
+    )
+    parser.add_argument(
+        '--exclude_hints',
+        action='store_true',
+        help='Exclude hints from the prompt (included by default)',
+    )
+    parser.add_argument(
+        '--exclude_pr_title',
+        action='store_true',
+        help='Exclude PR title from the prompt (included by default)',
+    )
+    parser.add_argument(
+        '--exclude_pr_description',
+        action='store_true',
+        help='Exclude PR description from the prompt (included by default)',
+    )
+    parser.add_argument(
+        '--exclude_patch',
+        action='store_true',
+        help='Exclude code patch/diff from the prompt (included by default)',
+    )
+    parser.add_argument(
+        '--include_existing_tests',
+        action='store_true',
+        help='Include existing test source in the prompt (excluded by default)',
+    )
     args, _ = parser.parse_known_args()
 
     if args.testfile_start and not args.zero_shot_path:
@@ -527,23 +684,36 @@ if __name__ == '__main__':
                 pred = json.loads(line)
                 preds_map[pred['id']] = pred['preds']['full'][0]
 
-    # NOTE: It is preferable to load datasets from huggingface datasets and perform post-processing
-    # so we don't need to manage file uploading to OpenHands's repo
-    dataset = load_dataset(args.dataset, split=args.split)
+    # Prefer local JSON/JSONL when provided; fall back to HF datasets otherwise
+    raw_dataset = load_testgeneval_dataset(args.dataset, args.split)
     logger.info(f'Loaded dataset {args.dataset} with split {args.split}')
-    testgeneval_filepairs = prepare_dataset_pre(dataset.to_pandas(), 'id')
+    testgeneval_filepairs = prepare_dataset_pre(pd.DataFrame(raw_dataset), 'id')
 
     llm_config = None
     if args.llm_config:
         llm_config = get_llm_config_arg(args.llm_config)
-        llm_config.log_completions = True
-        # modify_params must be False for evaluation purpose, for reproducibility and accuracy of results
-        llm_config.modify_params = False
 
     if llm_config is None:
-        raise ValueError(f'Could not find LLM config: --llm_config {args.llm_config}')
+        logger.info(f"No --llm_config provided, using default LLMConfig from environment variables.")
+        llm_config = LLMConfig()
 
-    details = {}
+    if llm_config.log_completions is None:
+        llm_config.log_completions = True
+
+    # modify_params must be False for evaluation purpose, for reproducibility and accuracy of results
+    llm_config.modify_params = False
+
+    # Pass new args to metadata details since signatures are fixed or hard to change cleanly
+    # Note: Most fields are INCLUDED by default, so we check for EXCLUDE flags
+    details = {
+        'no_coverage': args.no_coverage,
+        'include_issue': not args.exclude_issue,  # Included by default
+        'include_hints': not args.exclude_hints,  # Included by default
+        'include_pr_title': not args.exclude_pr_title,  # Included by default
+        'include_pr_description': not args.exclude_pr_description,  # Included by default
+        'include_patch': not args.exclude_patch,  # Included by default
+        'include_existing_tests': args.include_existing_tests,  # Excluded by default
+    }
     _agent_cls = openhands.agenthub.Agent.get_cls(args.agent_cls)
 
     dataset_descrption = (
